@@ -2,57 +2,79 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 from torchvision.transforms.functional import to_tensor, to_pil_image
-from diffusers import StableDiffusionXLControlNetPipeline, ControlNetModel, AutoencoderKL
-from IPython.display import display
-
+from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
+from diffusers import UniPCMultistepScheduler
 import os
 import matplotlib.pyplot as plt
+import matplotlib.lines as lines
+from PIL import Image
 
 from utils import (
-    process_images, 
+    process_images_edges,
     get_pytorch_edges
 )
-from losses import ( 
-    dice_coefficient_torch, 
-    chamfer_distance, 
-    get_target_dist_map
-)
+
+def dice_loss(pred, target, smooth=1e-5):
+    pred_flat = pred.view(-1)
+    target_flat = target.view(-1)
+    
+    intersection = (pred_flat * target_flat).sum()
+    dice_coeff = (2. * intersection + smooth) / (pred_flat.sum() + target_flat.sum() + smooth)
+    
+    return 1.0 - dice_coeff
 
 if __name__ == "__main__":
     WIDTH, HEIGHT = 512, 512
-    NUMBER_INFERENCE_STEP = 30
-    NUMBER_INFERENCE_TEST_STEP = 50
+    NUMBER_INFERENCE_STEP = 8
+    NUMBER_INFERENCE_TEST_STEP = 8
     NUM_STEP = 20
-    LEARNING_RATE = 1e-3
+    LEARNING_RATE = 1e-4
     
-    DICE_WEIGHT = 0.3
-    SSIM_WEIGHT = 0.3
-    CHAMFER_WEIGHT = 0.4
-    CONTROLNET_CONDITIONING_SCALE = 0.2
+    CONTROLNET_CONDITIONING_SCALE = 0.7
+    
+    DICE_WEIGHT = 1.0
+    MSE_WEIGHT = 0.0
+    CONSISTENCY_WEIGHT = 0.1
+    
+    NEGATIVE_PROMPT = "low contrast, washed out, illustration, abstract, bad quality"
 
     image_prompt_pairs = [
-        # ("Cyberpunk", "/root/KhaiDD/prompt_tunning_controlnet/data/439921836_3842411459416323_5840693379872517580_n.jpg"),
-        ("Cinematic wildlife photography, natural atmosphere, 8k", "/root/KhaiDD/prompt_tunning_controlnet/data/457858398_17897638527052725_2651477979417305260_n.jpg"),
-        # ("Portrait", "/root/KhaiDD/prompt_tunning_controlnet/data/467902762_8786841014697354_4401281500707445075_n.jpg"),
-        # ("Wildlife", "/root/KhaiDD/prompt_tunning_controlnet/data/473723145_1057803019697778_5812087022264039605_n.jpg"),
-        # ("Cinematic", "/root/KhaiDD/prompt_tunning_controlnet/data/474047330_1029392195893231_1448405286663373416_n.jpg"),
-        # ("Cosmic", "/root/KhaiDD/prompt_tunning_controlnet/data/FB_IMG_1725192745457.jpg")
+        (
+            "Sunny", 
+            "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000171_000019_gtFine_labelIds.png",
+            "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000171_000019_gtFine_color.png"
+        ),
+        (
+            "Winter", 
+            "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000171_000019_gtFine_labelIds.png",
+            "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000171_000019_gtFine_color.png"
+        ),                                                                          
     ]
 
-    edges_data = process_images(pairs=image_prompt_pairs, h=HEIGHT, w=WIDTH)
+    print("Processing Semantic Edges...")
+    edge_pairs = [(p[0], p[1]) for p in image_prompt_pairs]
+    edge_data = process_images_edges(pairs=edge_pairs, h=HEIGHT, w=WIDTH)
+    
+    for i, item in enumerate(edge_data):
+        item['color_path'] = image_prompt_pairs[i][2]
+    
+    output_dir = "comparison_results_seg_edge"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    plot_dir = "plot"
+    os.makedirs(plot_dir, exist_ok=True)
 
+    print("Loading SD 1.5 & ControlNet Segmentation...")
     controlnet = ControlNetModel.from_pretrained(
-        "diffusers/controlnet-canny-sdxl-1.0-small",
-        torch_dtype=torch.float16, variant="fp16"
-    )
-    vae = AutoencoderKL.from_pretrained(
-        "madebyollin/sdxl-vae-fp16-fix", 
+        "lllyasviel/sd-controlnet-seg",
         torch_dtype=torch.float16
     )
-    pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
-        "stabilityai/stable-diffusion-xl-base-1.0",
-        controlnet=controlnet, vae=vae,
-        torch_dtype=torch.float16, variant="fp16"
+    
+    pipe = StableDiffusionControlNetPipeline.from_pretrained(
+        "runwayml/stable-diffusion-v1-5",
+        controlnet=controlnet,
+        safety_checker=None,
+        torch_dtype=torch.float16
     )
     
     pipe.to("cuda")
@@ -62,35 +84,48 @@ if __name__ == "__main__":
     pipe.unet.requires_grad_(False)
     pipe.controlnet.requires_grad_(False)
     pipe.text_encoder.requires_grad_(False)
-    pipe.text_encoder_2.requires_grad_(False)
 
     pipe.unet.enable_gradient_checkpointing()
-
-    results_list = []
+    pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
     
-    for item in edges_data:
+    for item in edge_data:
         prompt = item['prompt']
-        canny_image = item['canny_pil']
-        target_dist_map = item['dist_map'] 
+        edge_pil = item['edge_pil'] 
+        target_edge_tensor = item['target_edge_tensor']
         
-        target_canny_tensor = to_tensor(canny_image).unsqueeze(0).to("cuda", dtype=torch.float32)
-        target_canny_tensor = target_canny_tensor[:, 0:1, :, :] 
+        color_path = item['color_path']
+        seg_pil = Image.open(color_path).convert("RGB").resize((WIDTH, HEIGHT))
 
         learnable_vector = torch.nn.Parameter(
-            torch.randn(1, 77, 2048, device="cuda", dtype=torch.float32) * 0.01
+            torch.randn(1, 77, 768, device="cuda", dtype=torch.float32) * 0.01
         )
         optimizer = torch.optim.AdamW([learnable_vector], lr=LEARNING_RATE)
 
         with torch.no_grad():
-            (prompt_embeds, negative_prompt_embeds,
-             pooled_prompt_embeds, negative_pooled_prompt_embeds) = pipe.encode_prompt(prompt=prompt)
+            prompt_embeds, negative_prompt_embeds = pipe.encode_prompt(
+                prompt=prompt, 
+                device="cuda",
+                num_images_per_prompt=1,
+                do_classifier_free_guidance=True,
+                negative_prompt=NEGATIVE_PROMPT
+            )
 
         raw_pipe_call = pipe.__call__
         while hasattr(raw_pipe_call, "__wrapped__"):
             raw_pipe_call = raw_pipe_call.__wrapped__
 
-        pbar = tqdm(range(NUM_STEP), desc=f"Tuning: {prompt[:15]}")
-        for step in pbar:
+        prev_output_edges = None
+        best_loss = float('inf')
+        best_vector = None
+        
+        # Chỉ cần khởi tạo mảng cho Total Loss
+        history_total = []
+        
+        print(f"\n[{'='*40}]")
+        print(f"Bắt đầu xử lý cho prompt: '{prompt[:30]}...'")
+        print(f"[{'='*40}]\n")
+
+        for step in range(NUM_STEP):
             torch.cuda.empty_cache()
             optimizer.zero_grad()
 
@@ -101,134 +136,144 @@ if __name__ == "__main__":
                     self=pipe,
                     prompt_embeds=modified_prompt_embeds,
                     negative_prompt_embeds=negative_prompt_embeds,
-                    pooled_prompt_embeds=pooled_prompt_embeds,
-                    negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-                    image=canny_image,
+                    image=seg_pil, 
                     controlnet_conditioning_scale=CONTROLNET_CONDITIONING_SCALE,
-                    num_inference_steps=NUMBER_INFERENCE_STEP, 
+                    num_inference_steps=NUMBER_INFERENCE_STEP,
                     height=HEIGHT, width=WIDTH,
                     output_type="pt"
                 )
 
             output_image = torch.clamp(output.images.to(torch.float32), 0.0, 1.0)
-            output_canny = get_pytorch_edges(output_image)
-
-            loss_dice = 1 - dice_coefficient_torch(output_canny, target_canny_tensor)
-            loss_ssim = F.mse_loss(output_canny, target_canny_tensor)
-            loss_chamfer = chamfer_distance(output_canny, target_dist_map)
-
-            total_loss = (loss_dice * DICE_WEIGHT + 
-                          loss_ssim * SSIM_WEIGHT + 
-                          loss_chamfer * CHAMFER_WEIGHT)
-
-            total_loss.backward()
             
-            torch.nn.utils.clip_grad_norm_([learnable_vector], 1.0)
+            output_edges = get_pytorch_edges(output_image)
+
+            loss_dice = dice_loss(output_edges, target_edge_tensor)
+            loss_mse = F.mse_loss(output_edges, target_edge_tensor)
+            
+            if prev_output_edges is not None:
+                loss_consistency = F.mse_loss(output_edges, prev_output_edges)
+            else:
+                loss_consistency = torch.tensor(0.0, device="cuda")            
+            
+            total_loss = (loss_dice * DICE_WEIGHT) + (loss_mse * MSE_WEIGHT) + (loss_consistency * CONSISTENCY_WEIGHT)
+            
+            total_loss.backward()
             optimizer.step()
 
-            pbar.set_postfix({"Loss": f"{total_loss.item():.4f}"})
+            current_loss_val = total_loss.item()
+            if current_loss_val < best_loss:
+                best_loss = current_loss_val
+                best_vector = learnable_vector.data.clone().detach()
 
-        print(f"\nGenerating tuned result for '{prompt}' with {NUMBER_INFERENCE_TEST_STEP} steps...")
+            prev_output_edges = output_edges.detach()
+            
+            # Chỉ lưu Total Loss
+            history_total.append(current_loss_val)
+            
+            print(f"Step [{step + 1:03d}] | Total: {total_loss.item():.5f} | "
+                  f"Dice: {loss_dice.item():.5f} | MSE: {loss_mse.item():.5f} | Consistency: {loss_consistency.item():.5f}")
+        
+        # ----------------------------------------------------
+        # VẼ BIỂU ĐỒ CHỈ VỚI TOTAL LOSS
+        # ----------------------------------------------------
+        print("\nĐang vẽ biểu đồ loss...")
+        plt.figure(figsize=(10, 6))
+        
+        plt.plot(history_total, label="Total Loss", color='blue', linewidth=2)
+        
+        plt.title(f"Total Loss Convergence: {prompt[:40]}...")
+        plt.xlabel("Tuning Steps")
+        plt.ylabel("Loss Value")
+        plt.legend()
+        plt.grid(True, linestyle='--', alpha=0.6)
+        
+        plot_filename = f"{prompt[:15].replace(' ', '_').lower()}_total_loss_curve.png"
+        plot_save_path = os.path.join(plot_dir, plot_filename)
+        plt.savefig(plot_save_path, dpi=200, bbox_inches='tight', facecolor='white')
+        plt.close() 
+        
+        print(f" -> Đã lưu biểu đồ loss tại: {plot_save_path}")
+
+        print("\nĐang generate hình ảnh so sánh...")
         with torch.no_grad():
-            final_modified_embeds = prompt_embeds + learnable_vector.to(torch.float16)
-            test_output = pipe(
+            final_modified_embeds = prompt_embeds + best_vector.to(torch.float16)
+            
+            tuning_output = pipe(
                 prompt_embeds=final_modified_embeds,
                 negative_prompt_embeds=negative_prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-                image=canny_image,
+                image=seg_pil, 
                 controlnet_conditioning_scale=CONTROLNET_CONDITIONING_SCALE,
-                num_inference_steps=NUMBER_INFERENCE_TEST_STEP, 
+                num_inference_steps=NUMBER_INFERENCE_TEST_STEP,
                 height=HEIGHT, width=WIDTH,
                 output_type="pt"
             )
+            tuning_img_pt = torch.clamp(tuning_output.images.to(torch.float32), 0.0, 1.0)
+            tuning_edge_pt = get_pytorch_edges(tuning_img_pt)
             
-            test_output_img = torch.clamp(test_output.images.to(torch.float32), 0.0, 1.0)
-            test_output_canny = get_pytorch_edges(test_output_img)
+            tuning_img_pil = to_pil_image(tuning_img_pt[0].cpu())
+            tuning_edge_pil = to_pil_image(tuning_edge_pt.squeeze(0).cpu())
 
-        results_list.append((
-            prompt,
-            canny_image,
-            to_pil_image(test_output_img[0].cpu()),
-            to_pil_image(test_output_canny[0].cpu())
-        ))
-
-    output_dir = "modified"
-    os.makedirs(output_dir, exist_ok=True)
-    print("Saving modified result...")
-    for prompt, target_canny, gen_img, gen_canny in results_list:
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        fig.suptitle(f"Tuning: {prompt}", fontsize=14, fontweight='bold')
-        
-        axes[0].imshow(target_canny, cmap='gray')
-        axes[0].set_title("Target (Ground Truth)")
-        axes[0].axis('off')
-        
-        axes[1].imshow(gen_img)
-        axes[1].axis('off')
-        
-        axes[2].imshow(gen_canny, cmap='gray')
-        axes[2].set_title("Generated Edge")
-        axes[2].axis('off')
-        
-        plt.tight_layout()
-        
-        filename = f"{prompt.replace(' ', '_').lower()}_tuning.png"
-        save_path = os.path.join(output_dir, filename)
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close(fig) 
-        
-        print(f" -> Saved: {filename}")
-
-    baseline_results = [] 
-    baseline_dir = "baseline"
-    os.makedirs(baseline_dir, exist_ok=True)
-
-    for item in tqdm(edges_data, desc="Baseline Generation"):
-        prompt = item['prompt']
-        canny_image = item['canny_pil']
-        
-        with torch.no_grad():
-            output = pipe(
-                prompt=prompt,
-                image=canny_image,
+            baseline_output = pipe(
+                prompt_embeds=prompt_embeds, 
+                negative_prompt_embeds=negative_prompt_embeds,
+                image=seg_pil,
                 controlnet_conditioning_scale=CONTROLNET_CONDITIONING_SCALE,
-                num_inference_steps=NUMBER_INFERENCE_TEST_STEP, 
-                height=HEIGHT,
-                width=WIDTH,
+                num_inference_steps=NUMBER_INFERENCE_TEST_STEP,
+                height=HEIGHT, width=WIDTH,
                 output_type="pt"
             )
+            baseline_img_pt = torch.clamp(baseline_output.images.to(torch.float32), 0.0, 1.0)
+            baseline_edge_pt = get_pytorch_edges(baseline_img_pt)
+            
+            baseline_img_pil = to_pil_image(baseline_img_pt[0].cpu())
+            baseline_edge_pil = to_pil_image(baseline_edge_pt.squeeze(0).cpu())
 
-            output_image = torch.clamp(output.images.to(torch.float32), 0.0, 1.0)
-            output_canny = get_pytorch_edges(output_image)
+        input_color_pil = seg_pil
 
-            gen_img_pil = to_pil_image(output_image[0].cpu())
-            gen_canny_pil = to_pil_image(output_canny[0].cpu())
+        fig, axes = plt.subplots(2, 3, figsize=(16, 10))
+        fig.suptitle(f"Tuning vs Baseline (Seg -> Edge Loss): {prompt[:40]}...", fontsize=16, fontweight='bold')
+        
+        axes[0, 0].imshow(input_color_pil)
+        axes[0, 0].set_title("Input Seg Map", fontsize=12, fontweight='bold')
+        
+        axes[0, 1].imshow(tuning_img_pil)
+        axes[0, 1].set_title("Generated Color (TUNING)", color='green', fontsize=12, fontweight='bold')
+        
+        axes[0, 2].imshow(baseline_img_pil)
+        axes[0, 2].set_title("Generated Color (BASELINE)", color='red', fontsize=12, fontweight='bold')
 
-            baseline_results.append((
-                prompt, 
-                canny_image,      
-                gen_img_pil,      
-                gen_canny_pil     
-            ))
+        axes[1, 0].imshow(edge_pil, cmap='gray')
+        axes[1, 0].set_title("Target Edges (Ground Truth)", fontsize=12, fontweight='bold')
+        
+        axes[1, 1].imshow(tuning_edge_pil, cmap='gray')
+        axes[1, 1].set_title("Generated Edge (TUNING)", color='green', fontsize=12, fontweight='bold')
+        
+        axes[1, 2].imshow(baseline_edge_pil, cmap='gray')
+        axes[1, 2].set_title("Generated Edge (BASELINE)", color='red', fontsize=12, fontweight='bold')
 
-    for prompt, target_canny, gen_img, gen_canny in baseline_results:
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        fig.suptitle(f"Baseline (No Tuning): {prompt}", fontsize=14, fontweight='bold')
+        for ax in axes.flatten():
+            ax.axis('off')
+
+        plt.tight_layout(w_pad=3.0)
+        fig.canvas.draw()
+
+        box0 = axes[0, 0].get_position()
+        box1 = axes[0, 1].get_position()
+        box2 = axes[0, 2].get_position()
         
-        axes[0].imshow(target_canny, cmap='gray')
-        axes[0].set_title("Target Canny")
-        axes[0].axis('off')
-        
-        axes[1].imshow(gen_img)
-        axes[1].axis('off')
-        
-        axes[2].imshow(gen_canny, cmap='gray')
-        axes[2].set_title("Generated Edge")
-        axes[2].axis('off')
-        
-        plt.tight_layout()
-        
-        filename = f"{prompt.replace(' ', '_').lower()}_baseline.png"
-        plt.savefig(os.path.join(baseline_dir, filename), dpi=150, bbox_inches='tight')
+        x_line_1 = (box0.x1 + box1.x0) / 2
+        x_line_2 = (box1.x1 + box2.x0) / 2
+
+        line_1 = lines.Line2D([x_line_1, x_line_1], [0.05, 0.90], transform=fig.transFigure, color="black", linewidth=3)
+        line_2 = lines.Line2D([x_line_2, x_line_2], [0.05, 0.90], transform=fig.transFigure, color="black", linewidth=3)
+        fig.add_artist(line_1)
+        fig.add_artist(line_2)
+
+        filename = f"{prompt[:15].replace(' ', '_').lower()}_seg_edge_comp.png"
+        save_path = os.path.join(output_dir, filename)
+        plt.savefig(save_path, dpi=200, bbox_inches='tight', facecolor='white')
         plt.close(fig)
+        
+        print(f" -> Đã lưu bảng so sánh thành công: {save_path}")
+
+    print("\n[HOÀN THÀNH] Toàn bộ quá trình chạy đã kết thúc!")

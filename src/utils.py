@@ -1,25 +1,11 @@
 import torch
-import numpy as np
 import torch.nn.functional as F
+import numpy as np
 from PIL import Image
 from torchvision.transforms.functional import to_tensor, to_pil_image
-import scipy.ndimage
-
 from tqdm import tqdm
 from diffusers.utils import load_image
-
-# Sử dụng sobel kernels để trích edges (do giữ được computational graph)
-def get_pytorch_edges(img_tensor):
-    gray = img_tensor.mean(dim=1, keepdim=True)
-    
-    # Sobel kernels
-    kx = torch.tensor([[-1., 0., 1.], [-2., 0., 2.], [-1., 0., 1.]], device=gray.device).view(1,1,3,3)
-    ky = torch.tensor([[-1., -2., -1.], [0., 0., 0.], [1., 2., 1.]], device=gray.device).view(1,1,3,3)
-    
-    gx = F.conv2d(gray, kx, padding=1)
-    gy = F.conv2d(gray, ky, padding=1)
-    mag = torch.sqrt(gx**2 + gy**2 + 1e-4)
-    return mag / (mag.max() + 1e-6)
+import os
 
 def rescale_image(img_tensor, height, width):
     return F.interpolate(
@@ -30,28 +16,47 @@ def rescale_image(img_tensor, height, width):
         antialias=True
     )
 
-def process_images(pairs, h, w):
+def get_pytorch_edges(img_tensor):
+    gray = img_tensor.mean(dim=1, keepdim=True)
+    
+    kx = torch.tensor([[-1., 0., 1.], [-2., 0., 2.], [-1., 0., 1.]], device=img_tensor.device).view(1,1,3,3)
+    ky = torch.tensor([[-1., -2., -1.], [0., 0., 0.], [1., 2., 1.]], device=img_tensor.device).view(1,1,3,3)
+    
+    gx = F.conv2d(gray, kx, padding=1)
+    gy = F.conv2d(gray, ky, padding=1)
+    mag = torch.sqrt(gx**2 + gy**2 + 1e-4)
+    
+    mag = mag / (mag.max() + 1e-6)
+    
+    y_soft = torch.sigmoid(15.0 * (mag - 0.1)) 
+    
+    y_hard = (mag > 0.35).float() 
+    
+    binary_edges = (y_hard - y_soft).detach() + y_soft
+    
+    return binary_edges
+
+def process_images_edges(pairs, h, w):
     results = [] 
     
-    for prompt, path in tqdm(pairs, desc="Preprocessing"):
-        raw_img = load_image(path)
-        img_tensor = to_tensor(raw_img).unsqueeze(0).to("cuda")
+    for prompt, path in tqdm(pairs, desc="Preprocessing Semantic Edges"):
+        raw_img = Image.open(path)
+        img_np = np.array(raw_img)
+        img_tensor = torch.from_numpy(img_np).unsqueeze(0).unsqueeze(0).float().to("cuda")
         
-        with torch.no_grad():
-            img_rescaled = rescale_image(img_tensor, h, w)
-            edges = get_pytorch_edges(img_rescaled) # [1, 1, H, W]
-            
-            edges_np = (edges.squeeze().cpu().numpy() > 0.1).astype(np.uint8) 
-            dist_map_np = scipy.ndimage.distance_transform_edt(1 - edges_np)
-            dist_map = torch.from_numpy(dist_map_np).float().to("cuda").unsqueeze(0).unsqueeze(0)
-            
-            edges_rgb = edges.repeat(1, 3, 1, 1)
-            canny_pil = to_pil_image(edges_rgb.squeeze(0).cpu())
+        img_rescaled = rescale_image(img_tensor, h, w)
+        
+        max_pool = F.max_pool2d(img_rescaled, kernel_size=3, stride=1, padding=1)
+        min_pool = -F.max_pool2d(-img_rescaled, kernel_size=3, stride=1, padding=1)
+        
+        edge_mask = (max_pool != min_pool).float() 
+        
+        edge_pil = to_pil_image((edge_mask.squeeze().cpu() * 255).byte().unsqueeze(0).repeat(3, 1, 1))
         
         results.append({
             'prompt': prompt,
-            'canny_pil': canny_pil,
-            'dist_map': dist_map
+            'edge_pil': edge_pil,              
+            'target_edge_tensor': edge_mask   
         })
         
     return results
