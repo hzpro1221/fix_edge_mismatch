@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 from torchvision.transforms.functional import to_tensor, to_pil_image
-from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
+from diffusers import StableDiffusionControlNetImg2ImgPipeline, ControlNetModel
 from diffusers import UniPCMultistepScheduler
 import os
 import matplotlib.pyplot as plt
@@ -25,38 +25,78 @@ def dice_loss(pred, target, smooth=1e-5):
 
 if __name__ == "__main__":
     WIDTH, HEIGHT = 512, 512
-    NUMBER_INFERENCE_STEP = 8
-    NUMBER_INFERENCE_TEST_STEP = 8
+    NUMBER_INFERENCE_STEP = 3
+    NUMBER_INFERENCE_TEST_STEP = 20
     NUM_STEP = 20
-    LEARNING_RATE = 1e-4
+    LEARNING_RATE = 2e-3
     
-    CONTROLNET_CONDITIONING_SCALE = 0.7
+    CONTROLNET_CONDITIONING_SCALE = 2.0
+    STRENGTH = 0.8
     
     DICE_WEIGHT = 1.0
     MSE_WEIGHT = 0.0
-    CONSISTENCY_WEIGHT = 0.1
+    CONSISTENCY_WEIGHT = 0.2
     
     NEGATIVE_PROMPT = "low contrast, washed out, illustration, abstract, bad quality"
 
     image_prompt_pairs = [
-        (
-            "Sunny", 
-            "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000171_000019_gtFine_labelIds.png",
-            "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000171_000019_gtFine_color.png"
-        ),
-        (
-            "Winter", 
-            "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000171_000019_gtFine_labelIds.png",
-            "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000171_000019_gtFine_color.png"
-        ),                                                                          
+        {
+            "prompt": "Sunny", 
+            "image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/leftImg8bit/train/aachen/aachen_000000_000019_leftImg8bit.png",
+            "segment_image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000000_000019_gtFine_color.png",
+            "edge_image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000000_000019_gtFine_labelIds.png"
+        },
+        {
+            "prompt": "Winter", 
+            "image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/leftImg8bit/train/aachen/aachen_000000_000019_leftImg8bit.png",
+            "segment_image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000000_000019_gtFine_color.png",
+            "edge_image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000000_000019_gtFine_labelIds.png"
+        },
+        {
+            "prompt": "Late night", 
+            "image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/leftImg8bit/train/aachen/aachen_000000_000019_leftImg8bit.png",
+            "segment_image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000000_000019_gtFine_color.png",
+            "edge_image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000000_000019_gtFine_labelIds.png"
+        },
+        {
+            "prompt": "Dust", 
+            "image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/leftImg8bit/train/aachen/aachen_000000_000019_leftImg8bit.png",
+            "segment_image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000000_000019_gtFine_color.png",
+            "edge_image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000000_000019_gtFine_labelIds.png"
+        },                        
+        {
+            "prompt": "Sunny", 
+            "image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/leftImg8bit/train/aachen/aachen_000001_000019_leftImg8bit.png",
+            "segment_image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000001_000019_gtFine_color.png",
+            "edge_image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000001_000019_gtFine_labelIds.png"
+        },
+        {
+            "prompt": "Winter", 
+            "image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/leftImg8bit/train/aachen/aachen_000001_000019_leftImg8bit.png",
+            "segment_image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000001_000019_gtFine_color.png",
+            "edge_image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000001_000019_gtFine_labelIds.png"
+        },   
+        {
+            "prompt": "Late night", 
+            "image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/leftImg8bit/train/aachen/aachen_000001_000019_leftImg8bit.png",
+            "segment_image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000001_000019_gtFine_color.png",
+            "edge_image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000001_000019_gtFine_labelIds.png"
+        }, 
+        {
+            "prompt": "Dust", 
+            "image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/leftImg8bit/train/aachen/aachen_000001_000019_leftImg8bit.png",
+            "segment_image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000001_000019_gtFine_color.png",
+            "edge_image_path": "/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data/gtFine/train/aachen/aachen_000001_000019_gtFine_labelIds.png"
+        },                         
     ]
 
     print("Processing Semantic Edges...")
-    edge_pairs = [(p[0], p[1]) for p in image_prompt_pairs]
-    edge_data = process_images_edges(pairs=edge_pairs, h=HEIGHT, w=WIDTH)
+    edge_pairs_for_utils = [(item['prompt'], item['edge_image_path']) for item in image_prompt_pairs]
+    edge_data = process_images_edges(pairs=edge_pairs_for_utils, h=HEIGHT, w=WIDTH)
     
     for i, item in enumerate(edge_data):
-        item['color_path'] = image_prompt_pairs[i][2]
+        item['image_path'] = image_prompt_pairs[i]['image_path']
+        item['segment_image_path'] = image_prompt_pairs[i]['segment_image_path']
     
     output_dir = "comparison_results_seg_edge"
     os.makedirs(output_dir, exist_ok=True)
@@ -70,7 +110,7 @@ if __name__ == "__main__":
         torch_dtype=torch.float16
     )
     
-    pipe = StableDiffusionControlNetPipeline.from_pretrained(
+    pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
         "runwayml/stable-diffusion-v1-5",
         controlnet=controlnet,
         safety_checker=None,
@@ -90,12 +130,12 @@ if __name__ == "__main__":
     
     for item in edge_data:
         prompt = item['prompt']
-        edge_pil = item['edge_pil'] 
-        target_edge_tensor = item['target_edge_tensor']
+        target_edge_tensor = item['target_edge_tensor'] 
+        edge_pil = item['edge_pil']
         
-        color_path = item['color_path']
-        seg_pil = Image.open(color_path).convert("RGB").resize((WIDTH, HEIGHT))
-
+        init_image = Image.open(item['image_path']).convert("RGB").resize((WIDTH, HEIGHT))
+        control_image = Image.open(item['segment_image_path']).convert("RGB").resize((WIDTH, HEIGHT))
+        
         learnable_vector = torch.nn.Parameter(
             torch.randn(1, 77, 768, device="cuda", dtype=torch.float32) * 0.01
         )
@@ -136,7 +176,9 @@ if __name__ == "__main__":
                     self=pipe,
                     prompt_embeds=modified_prompt_embeds,
                     negative_prompt_embeds=negative_prompt_embeds,
-                    image=seg_pil, 
+                    image=init_image,             
+                    control_image=control_image,  
+                    strength=STRENGTH,           
                     controlnet_conditioning_scale=CONTROLNET_CONDITIONING_SCALE,
                     num_inference_steps=NUMBER_INFERENCE_STEP,
                     height=HEIGHT, width=WIDTH,
@@ -201,7 +243,9 @@ if __name__ == "__main__":
             tuning_output = pipe(
                 prompt_embeds=final_modified_embeds,
                 negative_prompt_embeds=negative_prompt_embeds,
-                image=seg_pil, 
+                image=init_image,
+                control_image=control_image,
+                strength=STRENGTH,
                 controlnet_conditioning_scale=CONTROLNET_CONDITIONING_SCALE,
                 num_inference_steps=NUMBER_INFERENCE_TEST_STEP,
                 height=HEIGHT, width=WIDTH,
@@ -209,14 +253,15 @@ if __name__ == "__main__":
             )
             tuning_img_pt = torch.clamp(tuning_output.images.to(torch.float32), 0.0, 1.0)
             tuning_edge_pt = get_pytorch_edges(tuning_img_pt)
-            
             tuning_img_pil = to_pil_image(tuning_img_pt[0].cpu())
             tuning_edge_pil = to_pil_image(tuning_edge_pt.squeeze(0).cpu())
 
             baseline_output = pipe(
                 prompt_embeds=prompt_embeds, 
                 negative_prompt_embeds=negative_prompt_embeds,
-                image=seg_pil,
+                image=init_image,
+                control_image=control_image,
+                strength=STRENGTH,
                 controlnet_conditioning_scale=CONTROLNET_CONDITIONING_SCALE,
                 num_inference_steps=NUMBER_INFERENCE_TEST_STEP,
                 height=HEIGHT, width=WIDTH,
@@ -224,32 +269,29 @@ if __name__ == "__main__":
             )
             baseline_img_pt = torch.clamp(baseline_output.images.to(torch.float32), 0.0, 1.0)
             baseline_edge_pt = get_pytorch_edges(baseline_img_pt)
-            
             baseline_img_pil = to_pil_image(baseline_img_pt[0].cpu())
             baseline_edge_pil = to_pil_image(baseline_edge_pt.squeeze(0).cpu())
 
-        input_color_pil = seg_pil
-
         fig, axes = plt.subplots(2, 3, figsize=(16, 10))
-        fig.suptitle(f"Tuning vs Baseline (Seg -> Edge Loss): {prompt[:40]}...", fontsize=16, fontweight='bold')
+        fig.suptitle(f"Tuning vs Origin: {prompt[:40]}...", fontsize=16, fontweight='bold')
         
-        axes[0, 0].imshow(input_color_pil)
-        axes[0, 0].set_title("Input Seg Map", fontsize=12, fontweight='bold')
+        axes[0, 0].imshow(init_image)
+        axes[0, 0].set_title("Input image", fontsize=12, fontweight='bold')
         
         axes[0, 1].imshow(tuning_img_pil)
-        axes[0, 1].set_title("Generated Color (TUNING)", color='green', fontsize=12, fontweight='bold')
+        axes[0, 1].set_title("Generated Color (tunning)", color='green', fontsize=12, fontweight='bold')
         
         axes[0, 2].imshow(baseline_img_pil)
-        axes[0, 2].set_title("Generated Color (BASELINE)", color='red', fontsize=12, fontweight='bold')
+        axes[0, 2].set_title("Generated Color (Original)", color='red', fontsize=12, fontweight='bold')
 
         axes[1, 0].imshow(edge_pil, cmap='gray')
         axes[1, 0].set_title("Target Edges (Ground Truth)", fontsize=12, fontweight='bold')
         
         axes[1, 1].imshow(tuning_edge_pil, cmap='gray')
-        axes[1, 1].set_title("Generated Edge (TUNING)", color='green', fontsize=12, fontweight='bold')
+        axes[1, 1].set_title("Generated Edge (tunning)", color='green', fontsize=12, fontweight='bold')
         
         axes[1, 2].imshow(baseline_edge_pil, cmap='gray')
-        axes[1, 2].set_title("Generated Edge (BASELINE)", color='red', fontsize=12, fontweight='bold')
+        axes[1, 2].set_title("Generated Edge (original)", color='red', fontsize=12, fontweight='bold')
 
         for ax in axes.flatten():
             ax.axis('off')

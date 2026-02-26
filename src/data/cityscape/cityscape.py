@@ -135,7 +135,7 @@ def loader(base_path='/content/cityscapes'):
 
 if __name__ == "__main__":
     DEST_DIR = '/root/KhaiDD/prompt_tunning_controlnet/data/cityscape/data'
-    PACKAGE = 'gtFine_trainvaltest.zip'
+    PACKAGE = 'leftImg8bit_trainvaltest.zip'
     
     downloader(package_name=PACKAGE, destination_path=DEST_DIR, resume=True)
     

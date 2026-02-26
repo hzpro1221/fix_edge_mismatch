@@ -30,7 +30,7 @@ def get_pytorch_edges(img_tensor):
     
     y_soft = torch.sigmoid(15.0 * (mag - 0.1)) 
     
-    y_hard = (mag > 0.35).float() 
+    y_hard = (mag > 0.1).float() 
     
     binary_edges = (y_hard - y_soft).detach() + y_soft
     
