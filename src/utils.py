@@ -1,3 +1,4 @@
+
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -16,7 +17,7 @@ def rescale_image(img_tensor, height, width):
         antialias=True
     )
 
-def get_pytorch_edges(img_tensor):
+def get_pytorch_edges(img_tensor, k=15.0, threshold=0.1):
     gray = img_tensor.mean(dim=1, keepdim=True)
     
     kx = torch.tensor([[-1., 0., 1.], [-2., 0., 2.], [-1., 0., 1.]], device=img_tensor.device).view(1,1,3,3)
@@ -24,16 +25,16 @@ def get_pytorch_edges(img_tensor):
     
     gx = F.conv2d(gray, kx, padding=1)
     gy = F.conv2d(gray, ky, padding=1)
+    
     mag = torch.sqrt(gx**2 + gy**2 + 1e-4)
     
     mag = mag / (mag.max() + 1e-6)
     
-    y_soft = torch.sigmoid(15.0 * (mag - 0.1)) 
+    y_soft = torch.sigmoid(k * (mag - threshold)) 
     
-    y_hard = (mag > 0.1).float() 
+    y_hard = (mag > threshold).float() 
     
-    binary_edges = (y_hard - y_soft).detach() + y_soft
-    
+    binary_edges = (y_hard - y_soft).detach() + y_soft 
     return binary_edges
 
 def process_images_edges(pairs, h, w):
